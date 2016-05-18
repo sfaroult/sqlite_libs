@@ -1,0 +1,6 @@
+ceiling:ceil
+character_length:char_length
+now:localtimestamp
+every:bool_and
+stddev:stddev_samp
+variance:var_samp

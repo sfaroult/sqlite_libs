@@ -1,0 +1,262 @@
+if [ $# -ne 1 ]
+then
+  echo ''                                 >&2
+  echo 'Usage:'                           >&2
+  echo '  ./ build <dbms>'                >&2
+  echo '  where <dbms> is one of:'        >&2
+  echo '      ora (Oracle functions)'     >&2
+  echo '      pg  (PostgreSQL functions)' >&2
+  echo '      my  (MySQL functions)'      >&2
+  echo '      ss  (SQL Server functions)' >&2
+  echo ''                                 >&2
+  exit 1
+fi
+modules=''
+system=$(uname -s 2>/dev/null)
+#
+#  Check the system to get the right dynamic library extension
+#
+if [ "$system" = 'Darwin' ]
+then
+  # Mac
+  dylib='dylib'
+else
+  dylib='so'
+fi
+#
+#  Check whether sqlite3 is known (it should be)
+#
+have_sqlite=$(whereis sqlite3)
+need_sqlite=0
+if [ "$have_sqlite" != '' ]
+then
+  #
+  #  Check whether the sqlite3 program was compiled with .load enabled
+  #
+  cannot_load=$(echo ".load dummy" | sqlite3 2>&1 | grep load | wc -l)
+  if [ $cannot_load -eq 1 ]
+  then
+    #
+    # Need to recompile sqlite3 from source
+    #
+    # Comes in two flavors, sqlite-amalgamation-*.zip and 
+    # sqlite-autoconf-*.tar.gz
+    #
+    echo "The currently installed version of sqlite3 doesn't allow to" >&2
+    echo "dynamically load libraries." >&2
+  fi
+fi
+  
+dbms=$(echo $1 | tr '[:upper:]' '[:lower:]')
+DBMS=$(echo $1 | tr '[:lower:]' '[:upper:]')
+if [ ! -f ./ksu/ksu_${dbms}.c ]
+then
+  touch ./ksu/ksu_${dbms}.c
+fi
+#
+# Prepare generated files
+#
+# xxfn.h
+xxfn_h="${dbms}fn.h"
+echo "#ifndef ${DBMS}FN_H"   > $xxfn_h
+echo ""                     >> $xxfn_h
+echo "#define ${DBMS}FN_H"  >> $xxfn_h
+echo ""                     >> $xxfn_h
+echo "#include <sqlite3.h>" >> $xxfn_h
+echo ""                     >> $xxfn_h
+# entry_point.c
+echo "#include <stdio.h>"        > entry_point.c
+echo "#include <stdlib.h>"      >> entry_point.c
+echo "#include <string.h>"      >> entry_point.c
+echo "#include <ctype.h>"       >> entry_point.c
+echo "#include <locale.h>"      >> entry_point.c
+echo "#include <sqlite3ext.h>"  >> entry_point.c
+echo ""                         >> entry_point.c
+echo "#include <ksu_common.h>"  >> entry_point.c
+echo ""                         >> entry_point.c
+echo "#include \"${dbms}fn.h\"" >> entry_point.c
+echo ""                         >> entry_point.c
+echo "SQLITE_EXTENSION_INIT1"   >> entry_point.c
+echo ""                         >> entry_point.c
+echo "extern int sqlite3_extension_init(sqlite3 *db,"    >> entry_point.c
+echo "             char   **pzErrMsg,"                   >> entry_point.c
+echo "             const sqlite3_api_routines  *pApi) {" >> entry_point.c
+echo "  SQLITE_EXTENSION_INIT2(pApi)" >> entry_point.c
+echo "  ksu_i18n();"                  >> entry_point.c
+# makefile
+echo "# SQLITE_OBJ can be replaced with a freshly compiled sqlite3.o" > makefile
+echo "SQLITE_OBJ=-lsqlite3"                                >> makefile
+echo "COMMON_DIR=./ksu"                >> makefile
+echo "CFLAGS=-Wall -I\$(COMMON_DIR) -D ${DBMS}_FUNC -fPIC" >> makefile
+echo ""                             >> makefile
+echo "all: ${dbms}fn.${dylib}"         >> makefile
+echo ""                             >> makefile
+echo "entry_point.o: entry_point.c ${dbms}fn.h"   >> makefile
+echo "	gcc -c \$(CFLAGS) -o entry_point.o entry_point.c" >> makefile
+echo ""                             >> makefile
+echo "ksu_common.o: \$(COMMON_DIR)/ksu_common.c"          >> makefile
+echo "	gcc -c \$(CFLAGS) -o ksu_common.o \$(COMMON_DIR)/ksu_common.c" >> makefile
+echo ""                             >> makefile
+echo "ksu_utf8.o: \$(COMMON_DIR)/ksu_utf8.c"          >> makefile
+echo "	gcc -c \$(CFLAGS) -o ksu_utf8.o \$(COMMON_DIR)/ksu_utf8.c" >> makefile
+echo ""                             >> makefile
+echo "ksu_unicode.o: \$(COMMON_DIR)/ksu_unicode.c"          >> makefile
+echo "	gcc -c \$(CFLAGS) -o ksu_unicode.o \$(COMMON_DIR)/ksu_unicode.c" >> makefile
+echo ""                             >> makefile
+echo "ksu_dates.o: \$(COMMON_DIR)/ksu_dates.c"          >> makefile
+echo "	gcc -c \$(CFLAGS) -o ksu_dates.o \$(COMMON_DIR)/ksu_dates.c" >> makefile
+echo ""                             >> makefile
+echo "ksu_intv.o: \$(COMMON_DIR)/ksu_intv.c"          >> makefile
+echo "	gcc -c \$(CFLAGS) -o ksu_intv.o \$(COMMON_DIR)/ksu_intv.c" >> makefile
+echo ""                             >> makefile
+echo "kwintv.o: \$(COMMON_DIR)/kwintv.c"          >> makefile
+echo "	gcc -c \$(CFLAGS) -o kwintv.o \$(COMMON_DIR)/kwintv.c" >> makefile
+echo ""                             >> makefile
+echo "ksu_${dbms}.o: \$(COMMON_DIR)/ksu_${dbms}.c"          >> makefile
+echo "	gcc -c \$(CFLAGS) -o ksu_${dbms}.o \$(COMMON_DIR)/ksu_${dbms}.c" >> makefile
+echo ""                             >> makefile
+#
+#    Main loop
+#
+sedcmd="s/${dbms}_//"
+for cfile in $(find ./${dbms} -name '*.c')
+do
+  bname=$(basename $cfile .c)
+  dname=$(dirname $cfile)
+  notdet=$(grep -e locale -e i18n $cfile | wc -l)
+  aggrutil=0
+  aggr=$(grep -e "${bname}_final" $cfile | wc -l)
+  if [ $aggr -eq 0 ]
+  then
+    aggr=$(echo $cfile | grep '_aggr_' | wc -l)
+    aggrutil=1
+  fi
+  if [ $aggr -eq 0 ]
+  then
+    vararg=$(grep _ksu_check_arg_cnt $cfile | wc -l)
+    echo "extern void ${bname}(sqlite3_context  *context," >> $xxfn_h
+    echo "                    int               argc,"     >> $xxfn_h
+    echo "                    sqlite3_value   **argv);"    >> $xxfn_h
+    sqlname=$(echo $bname | sed "$sedcmd")
+    if [ $vararg -eq 0 ]
+    then
+      maxarg=$(grep 'argv\[' $cfile | sed 's/^.*\[//' | \
+                 sed 's/\].*$//' | sort -rnu | head -1)
+      if [ "$maxarg" = '' ]
+      then
+        maxarg=0
+      else
+        maxarg=$(( $maxarg + 1 ))
+      fi
+    else
+      maxarg=-1
+    fi 
+    if [ $notdet -eq 0 ]
+    then
+      echo "  sqlite3_create_function(db,\"${sqlname}\",${maxarg}," >> entry_point.c
+      echo "                          SQLITE_UTF8|SQLITE_DETERMINISTIC," >> entry_point.c
+    else
+      echo "  sqlite3_create_function(db,\"${sqlname}\",${maxarg},SQLITE_UTF8," >> entry_point.c
+    fi
+    echo "                          0,${bname},0,0);" >> entry_point.c
+    # Process possible synonyms
+    if [ -f ./${dbms}/syn.txt ]
+    then
+      for syn in $(grep -i ":${sqlname}\$" ./${dbms}/syn.txt | \
+                   cut -f1 -d: | tr '[:upper:]' '[:lower:]')
+      do
+        if [ $notdet -eq 0 ]
+        then
+          echo "  sqlite3_create_function(db,\"${syn}\",${maxarg}," >> entry_point.c
+          echo "                          SQLITE_UTF8|SQLITE_DETERMINISTIC," >> entry_point.c
+        else
+          echo "  sqlite3_create_function(db,\"${syn}\",${maxarg},SQLITE_UTF8," >> entry_point.c
+        fi
+        echo "                          0,${bname},0,0);" >> entry_point.c
+      done
+    fi
+  else
+    # Aggregate function, or related to aggregate functions
+    # if $aggrutil is 1
+    if [ $aggrutil -eq 0 ]
+    then
+      stepfunc=$(grep 'void .*_step' $cfile | \
+           sed -e 's/^.*void [\s]*//' -e 's/(.*$//')
+      if [ "$stepfunc" = '' ]
+      then
+        # Look for an included file
+        incfile=$(sed -e '/#include/!d' -e '/_aggr_/!d' $cfile \
+                  | sed -e 's/#include  *"//' -e 's/" *$//')
+        if [ "$incfile" != '' ]
+        then
+          stepfunc=$(grep 'void .*_step' ${dname}/${incfile} | \
+               sed -e 's/^.*void [\s]*//' -e 's/(.*$//')
+          stepfile=$(echo ${dname}/${incfile} | sed 's/\.h$/\.c/')
+        fi
+      else
+        stepfile=$cfile
+      fi
+      vararg=$(grep _ksu_check_arg_cnt $stepfile | wc -l)
+      if [ $vararg -eq 0 ]
+      then
+        maxarg=$(grep 'argv\[' $stepfile | sed 's/^.*\[//' | \
+               sed 's/\].*$//' | sort -rnu | head -1)
+        if [ "$maxarg" = '' ]
+        then
+          maxarg=0
+        else
+          maxarg=$(( $maxarg + 1 ))
+        fi
+      else
+        maxarg=-1
+      fi 
+      echo "extern void ${stepfunc}(sqlite3_context  *context," >> $xxfn_h
+      echo "                    int               argc,"     >> $xxfn_h
+      echo "                    sqlite3_value   **argv);"    >> $xxfn_h
+      echo "extern void ${bname}_final(sqlite3_context  *context);" >> $xxfn_h
+      sqlname=$(echo $bname | sed "$sedcmd")
+      if [ $notdet -eq 0 ]
+      then
+        echo "  sqlite3_create_function(db,\"${sqlname}\",${maxarg}," >> entry_point.c
+        echo "                          SQLITE_UTF8|SQLITE_DETERMINISTIC," >> entry_point.c
+      else
+        echo "  sqlite3_create_function(db,\"${sqlname}\",${maxarg},SQLITE_UTF8," >> entry_point.c
+      fi
+      echo "                          0,0,${stepfunc},${bname}_final);" >> entry_point.c
+      # Process possible synonyms
+      if [ -f ./${dbms}/syn.txt ]
+      then
+        for syn in $(grep -i ":${sqlname}\$" ./${dbms}/syn.txt | \
+                     cut -f1 -d: | tr '[:upper:]' '[:lower:]')
+        do
+          if [ $notdet -eq 0 ]
+          then
+            echo "  sqlite3_create_function(db,\"${syn}\",${maxarg}," >> entry_point.c
+            echo "                          SQLITE_UTF8|SQLITE_DETERMINISTIC," >> entry_point.c
+          else
+            echo "  sqlite3_create_function(db,\"${syn}\",1,SQLITE_UTF8," >> entry_point.c
+          fi
+          echo "                          0,0,${stepfunc},${bname}_final);" >> entry_point.c
+        done
+      fi
+    fi
+  fi
+  echo "${bname}.o: ${cfile}"                       >> makefile
+  echo "	gcc -c \$(CFLAGS) -o ${bname}.o ${cfile}" >> makefile
+  echo ""                                           >> makefile
+  modules="$modules ${bname}.o"
+done
+# Terminate generated files
+# $xxfn_h
+echo ""       >> $xxfn_h
+echo "#endif" >> $xxfn_h
+# entry_point.c
+echo "  return 0;" >> entry_point.c
+echo "}"           >> entry_point.c
+# makefile
+echo "${dbms}fn.${dylib}: entry_point.o ksu_common.o ksu_utf8.o ksu_unicode.o ksu_dates.o ksu_intv.o kwintv.o ksu_${dbms}.o ${modules}" >> makefile
+echo "	gcc -g -fPIC -dynamiclib -o ${dbms}fn.${dylib} entry_point.o \\" >> makefile
+echo "		${modules} ksu_common.o ksu_utf8.o ksu_unicode.o ksu_dates.o ksu_intv.o kwintv.o ksu_${dbms}.o \$(SQLITE_OBJ) -lm -lcrypto" >> makefile
+echo "" >> makefile
+echo "clean:" >> makefile
+echo "	rm *.o *.${dylib}" >> makefile
